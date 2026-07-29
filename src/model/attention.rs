@@ -5,7 +5,7 @@
 //! always returns just the attention output.
 
 use crate::config::VitsConfig;
-use candle_core::{DType, Result, Tensor, D};
+use candle_core::{DType, Result, Tensor, D, Module};
 use candle_nn::{Linear, VarBuilder};
 
 pub struct VitsAttention {
@@ -90,12 +90,13 @@ impl VitsAttention {
 
         // Relative positional bias (window_size is always set for this model).
         let key_relative_embeddings = self.get_relative_embeddings(&self.emb_rel_k, src_len)?;
+        let key_relative_embeddings = key_relative_embeddings.broadcast_as((
+            proj_bsz,
+            key_relative_embeddings.dim(1)?,
+            self.head_dim,
+        ))?;
         let relative_logits =
-            query_states.matmul(&key_relative_embeddings.transpose(D::Minus2, D::Minus1)?.broadcast_as((
-                proj_bsz,
-                key_relative_embeddings.dim(1)?,
-                self.head_dim,
-            ))?.transpose(1, 2)?)?;
+            query_states.matmul(&key_relative_embeddings.transpose(D::Minus2, D::Minus1)?)?;
         let rel_pos_bias = self.relative_position_to_absolute_position(&relative_logits)?;
         attn_weights = attn_weights.add(&rel_pos_bias)?;
 
@@ -113,11 +114,12 @@ impl VitsAttention {
 
         let value_relative_embeddings = self.get_relative_embeddings(&self.emb_rel_v, src_len)?;
         let relative_weights = self.absolute_position_to_relative_position(&attn_probs)?;
-        let rel_pos_bias_v = relative_weights.matmul(&value_relative_embeddings.broadcast_as((
+        let value_relative_embeddings = value_relative_embeddings.broadcast_as((
             proj_bsz,
             value_relative_embeddings.dim(1)?,
             self.head_dim,
-        ))?)?;
+        ))?;
+        let rel_pos_bias_v = relative_weights.matmul(&value_relative_embeddings)?;
         attn_output = attn_output.add(&rel_pos_bias_v)?;
 
         let attn_output = attn_output

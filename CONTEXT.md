@@ -42,12 +42,12 @@
 - [x] Port `model/flows.rs` (coupling layers, conv flow, spline math, dilated depthwise conv)
 - [x] Port `model/duration_predictor.rs` (stochastic variant only)
 - [x] Port `model/attention.rs`
-- [ ] Port `model/text_encoder.rs` (encoder layer, feed-forward, encoder, text encoder)
-- [ ] Port `model/hifigan.rs`
-- [ ] Port `model/mod.rs` (VitsModel top-level forward)
-- [ ] Port `main.rs` (CLI wiring + WAV writer)
-- [ ] Write Cargo.toml with candle deps
-- [ ] User runs `cargo check` / `cargo build` and reports back any compile errors for fixes
+- [x] Port `model/text_encoder.rs` (encoder layer, feed-forward, encoder, text encoder)
+- [x] Port `model/hifigan.rs`
+- [x] Port `model/mod.rs` (VitsModel top-level forward)
+- [x] Port `main.rs` (CLI wiring + WAV writer)
+- [x] Write Cargo.toml with candle deps
+- [x] User runs `cargo check` / `cargo build` and reports back any compile errors for fixes
 
 ## Notes for follow-up
 - Not run `cargo check`/`cargo build` per instructions — user will run manually.

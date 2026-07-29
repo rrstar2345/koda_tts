@@ -12,8 +12,9 @@
 //! 1:1, aiding maintainability.
 
 use super::wavenet::VitsWaveNet;
+use super::tensor_ext::FlipExt;
 use crate::config::VitsConfig;
-use candle_core::{DType, Result, Tensor, D};
+use candle_core::{DType, Result, Tensor, D, Module};
 use candle_nn::{Conv1d, Conv1dConfig, LayerNorm, VarBuilder};
 
 // ---------------------------------------------------------------------
@@ -67,22 +68,22 @@ impl VitsResidualCouplingLayer {
         let first_half = inputs.narrow(1, 0, self.half_channels)?;
         let second_half = inputs.narrow(1, self.half_channels, self.half_channels)?;
 
-        let mut hidden_states = self.conv_pre.forward(&first_half)?.mul(padding_mask)?;
+        let mut hidden_states = self.conv_pre.forward(&first_half)?.broadcast_mul(padding_mask)?;
         hidden_states = self.wavenet.forward(&hidden_states, padding_mask, global_conditioning)?;
-        let mean = self.conv_post.forward(&hidden_states)?.mul(padding_mask)?;
+        let mean = self.conv_post.forward(&hidden_states)?.broadcast_mul(padding_mask)?;
         let log_stddev = Tensor::zeros_like(&mean)?;
 
         if !reverse {
-            let second_half =
-                (mean.clone() + second_half.mul(&log_stddev.exp()?)?)?.mul(padding_mask)?;
+            let second_half = (mean.clone() + second_half.broadcast_mul(&log_stddev.exp()?)?)?
+                .broadcast_mul(padding_mask)?;
             let outputs = Tensor::cat(&[&first_half, &second_half], 1)?;
             let log_determinant = log_stddev.sum((1, 2))?;
             Ok((outputs, Some(log_determinant)))
         } else {
             let second_half = second_half
                 .sub(&mean)?
-                .mul(&log_stddev.neg()?.exp()?)?
-                .mul(padding_mask)?;
+                .broadcast_mul(&log_stddev.neg()?.exp()?)?
+                .broadcast_mul(padding_mask)?;
             let outputs = Tensor::cat(&[&first_half, &second_half], 1)?;
             Ok((outputs, None))
         }
@@ -159,7 +160,7 @@ impl VitsDilatedDepthSeparableConv {
                 stride: 1,
                 dilation,
                 groups: channels,
-                cudnn_fwd_algo: None,
+                // cudnn_fwd_algo: None,
             };
             let dilated_vb = vb.pp(format!("convs_dilated.{i}"));
             let weight = dilated_vb.get((channels, 1, kernel_size), "weight")?;
@@ -209,7 +210,7 @@ impl VitsDilatedDepthSeparableConv {
         };
 
         for i in 0..self.num_layers {
-            let masked = inputs.mul(padding_mask)?;
+            let masked = inputs.broadcast_mul(padding_mask)?;
             let mut hidden_states = self.convs_dilated[i].forward(&masked)?;
             hidden_states = self.norms_1[i]
                 .forward(&hidden_states.transpose(1, D::Minus1)?)?
@@ -226,7 +227,7 @@ impl VitsDilatedDepthSeparableConv {
             inputs = inputs.add(&hidden_states)?;
         }
 
-        inputs.mul(padding_mask)
+        inputs.broadcast_mul(padding_mask)
     }
 }
 
@@ -288,7 +289,7 @@ impl VitsConvFlow {
 
         let mut hidden_states = self.conv_pre.forward(&first_half)?;
         hidden_states = self.conv_dds.forward(&hidden_states, padding_mask, global_conditioning)?;
-        hidden_states = self.conv_proj.forward(&hidden_states)?.mul(padding_mask)?;
+        hidden_states = self.conv_proj.forward(&hidden_states)?.broadcast_mul(padding_mask)?;
 
         let (batch_size, _channels, length) = first_half.dims3()?;
         // reshape(batch, channels, -1, length).permute(0, 1, 3, 2)
@@ -317,9 +318,9 @@ impl VitsConvFlow {
             1e-3,
         )?;
 
-        let outputs = Tensor::cat(&[&first_half, &second_half_out], 1)?.mul(padding_mask)?;
+        let outputs = Tensor::cat(&[&first_half, &second_half_out], 1)?.broadcast_mul(padding_mask)?;
         if !reverse {
-            let log_determinant = log_abs_det.mul(padding_mask)?.sum((1, 2))?;
+            let log_determinant = log_abs_det.broadcast_mul(padding_mask)?.sum((1, 2))?;
             Ok((outputs, Some(log_determinant)))
         } else {
             Ok((outputs, None))
@@ -355,14 +356,14 @@ impl VitsElementwiseAffine {
             let outputs = self
                 .translate
                 .broadcast_add(&self.log_scale.exp()?.broadcast_mul(inputs)?)?
-                .mul(padding_mask)?;
+                .broadcast_mul(padding_mask)?;
             let log_determinant = self.log_scale.broadcast_mul(padding_mask)?.sum((1, 2))?;
             Ok((outputs, Some(log_determinant)))
         } else {
             let outputs = inputs
                 .broadcast_sub(&self.translate)?
                 .broadcast_mul(&self.log_scale.neg()?.exp()?)?
-                .mul(padding_mask)?;
+                .broadcast_mul(padding_mask)?;
             Ok((outputs, None))
         }
     }
@@ -457,7 +458,7 @@ fn rational_quadratic_spline(
         .narrow(D::Minus1, 1, last_idx)?
         .sub(&cumwidths.narrow(D::Minus1, 0, last_idx)?)?;
 
-    let derivatives = (candle_nn::ops::softplus(unnormalized_derivatives)? + min_derivative)?;
+    let derivatives = (softplus(unnormalized_derivatives)? + min_derivative)?;
 
     let heights = candle_nn::ops::softmax(unnormalized_heights, D::Minus1)?;
     let heights = ((heights * (1.0 - min_bin_height * num_bins as f64))? + min_bin_height)?;
@@ -540,6 +541,11 @@ fn rational_quadratic_spline(
         let log_abs_det = derivative_numerator.log()?.sub(&(denominator.log()? * 2.0)?)?;
         Ok((outputs, log_abs_det.neg()?))
     }
+}
+
+fn softplus(x: &Tensor) -> Result<Tensor> {
+    let one = Tensor::new(1.0f32, x.device())?;
+    x.exp()?.broadcast_add(&one)?.log()
 }
 
 // ---------------------------------------------------------------------
@@ -625,7 +631,9 @@ fn bump_last_index(x: &Tensor, eps: f64) -> Result<Tensor> {
 /// matches `x` except the last dim is 1, then drops that trailing dim
 /// (mirrors `x.gather(-1, idx)[..., 0]` in the Python source).
 fn gather_last(x: &Tensor, idx: &Tensor) -> Result<Tensor> {
-    let gathered = x.gather(idx, x.rank() - 1)?;
+    let x = x.contiguous()?;
+    let idx = idx.contiguous()?;
+    let gathered = x.gather(&idx, x.rank() - 1)?;
     gathered.squeeze(D::Minus1)
 }
 

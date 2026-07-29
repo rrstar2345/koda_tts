@@ -10,8 +10,9 @@
 //! loss (`nll + logq`) that's never used for inference and is not ported.
 
 use super::flows::{VitsConvFlow, VitsDilatedDepthSeparableConv, VitsElementwiseAffine};
+use super::tensor_ext::FlipExt;
 use crate::config::VitsConfig;
-use candle_core::{Device, Result, Tensor};
+use candle_core::{Device, Result, Tensor, Module};
 use candle_nn::{Conv1d, Conv1dConfig, VarBuilder};
 
 enum Flow {
@@ -99,7 +100,7 @@ impl VitsStochasticDurationPredictor {
         }
 
         inputs = self.conv_dds.forward(&inputs, padding_mask, None)?;
-        inputs = self.conv_proj.forward(&inputs)?.mul(padding_mask)?;
+        inputs = self.conv_proj.forward(&inputs)?.broadcast_mul(padding_mask)?;
 
         // Python: `flows = list(reversed(self.flows)); flows = flows[:-2] + [flows[-1]]`
         // i.e. reverse the list, then drop the second-to-last element

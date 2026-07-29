@@ -5,7 +5,7 @@
 
 use super::wavenet::load_weight_norm_conv1d;
 use crate::config::VitsConfig;
-use candle_core::{Result, Tensor};
+use candle_core::{Result, Tensor, Module};
 use candle_nn::{Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, VarBuilder};
 
 fn leaky_relu(x: &Tensor, slope: f64) -> Result<Tensor> {
@@ -39,7 +39,7 @@ impl HifiGanResidualBlock {
                 stride: 1,
                 dilation: d,
                 groups: 1,
-                cudnn_fwd_algo: None,
+                // cudnn_fwd_algo: None,
             };
             convs1.push(load_weight_norm_conv1d(
                 &vb.pp(format!("convs1.{i}")),
@@ -55,7 +55,7 @@ impl HifiGanResidualBlock {
                 stride: 1,
                 dilation: 1,
                 groups: 1,
-                cudnn_fwd_algo: None,
+                // cudnn_fwd_algo: None,
             };
             convs2.push(load_weight_norm_conv1d(
                 &vb.pp(format!("convs2.{i}")),
@@ -109,7 +109,7 @@ impl VitsHifiGan {
             stride: 1,
             dilation: 1,
             groups: 1,
-            cudnn_fwd_algo: None,
+            // cudnn_fwd_algo: None,
         };
         let conv_pre = candle_nn::conv1d(
             config.flow_size,
@@ -169,7 +169,7 @@ impl VitsHifiGan {
             stride: 1,
             dilation: 1,
             groups: 1,
-            cudnn_fwd_algo: None,
+            // cudnn_fwd_algo: None,
         };
         let conv_post_vb = vb.pp("conv_post");
         let conv_post = Conv1d::new(
@@ -241,13 +241,23 @@ fn load_weight_norm_conv_transpose1d(
 ) -> Result<ConvTranspose1d> {
     let shape = (in_channels, out_channels, kernel_size);
 
-    let (g, v) = if vb.contains_tensor("weight_g") && vb.contains_tensor("weight_v") {
-        (vb.get((in_channels, 1, 1), "weight_g")?, vb.get(shape, "weight_v")?)
+    if let Ok(weight) = vb.get(shape, "weight") {
+        let bias = vb.get(out_channels, "bias")?;
+        return Ok(ConvTranspose1d::new(weight, Some(bias), cfg));
+    }
+
+    let (g, v) = if let (Ok(g), Ok(v)) = (vb.get((in_channels, 1, 1), "weight_g"), vb.get(shape, "weight_v")) {
+        (g, v)
+    } else if let (Ok(g), Ok(v)) = (
+        vb.get((in_channels, 1, 1), "parametrizations.weight.original0"),
+        vb.get(shape, "parametrizations.weight.original1"),
+    ) {
+        (g, v)
     } else {
-        (
-            vb.get((in_channels, 1, 1), "parametrizations.weight.original0")?,
-            vb.get(shape, "parametrizations.weight.original1")?,
-        )
+        candle_core::bail!(
+            "expected weight_norm tensors `weight_g`/`weight_v`, \
+             `parametrizations.weight.original0`/`original1`, or plain `weight`"
+        );
     };
 
     let v_sq_sum = v.sqr()?.sum_keepdim((1, 2))?;

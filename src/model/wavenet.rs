@@ -6,7 +6,7 @@
 //! callers always pass `None` (see CONTEXT.md).
 
 use crate::config::VitsConfig;
-use candle_core::{Result, Tensor};
+use candle_core::{Result, Tensor, Module};
 use candle_nn::{Conv1d, Conv1dConfig, VarBuilder};
 
 pub(crate) fn fused_add_tanh_sigmoid_multiply(
@@ -61,7 +61,7 @@ impl VitsWaveNet {
                 stride: 1,
                 dilation,
                 groups: 1,
-                cudnn_fwd_algo: None,
+                // cudnn_fwd_algo: None,
             };
             let in_layer_vb = vb.pp(format!("in_layers.{i}"));
             let in_layer = load_weight_norm_conv1d(
@@ -134,7 +134,7 @@ impl VitsWaveNet {
             let res_skip_acts = self.res_skip_layers[i].forward(&acts)?;
             if i < self.num_layers - 1 {
                 let res_acts = res_skip_acts.narrow(1, 0, self.hidden_size)?;
-                inputs = inputs.add(&res_acts)?.mul(padding_mask)?;
+                inputs = inputs.add(&res_acts)?.broadcast_mul(padding_mask)?;
                 let skip = res_skip_acts.narrow(
                     1,
                     self.hidden_size,
@@ -146,7 +146,7 @@ impl VitsWaveNet {
             }
         }
 
-        outputs.mul(padding_mask)
+        outputs.broadcast_mul(padding_mask)
     }
 }
 
@@ -168,13 +168,20 @@ pub(crate) fn load_weight_norm_conv1d(
 ) -> Result<Conv1d> {
     let shape = (out_channels, in_channels, kernel_size);
 
-    let (g, v) = if vb.contains_tensor("weight_g") && vb.contains_tensor("weight_v") {
-        (vb.get((out_channels, 1, 1), "weight_g")?, vb.get(shape, "weight_v")?)
+    let (g, v) = if let (Ok(g), Ok(v)) = (vb.get((out_channels, 1, 1), "weight_g"), vb.get(shape, "weight_v")) {
+        (g, v)
+    } else if let (Ok(g), Ok(v)) = (
+        vb.get((out_channels, 1, 1), "parametrizations.weight.original0"),
+        vb.get(shape, "parametrizations.weight.original1"),
+    ) {
+        (g, v)
+    } else if let Ok(weight) = vb.get(shape, "weight") {
+        return Ok(Conv1d::new(weight, if bias { Some(vb.get(out_channels, "bias")?) } else { None }, cfg));
     } else {
-        (
-            vb.get((out_channels, 1, 1), "parametrizations.weight.original0")?,
-            vb.get(shape, "parametrizations.weight.original1")?,
-        )
+        candle_core::bail!(
+            "expected weight_norm tensors `weight_g`/`weight_v`, \
+             `parametrizations.weight.original0`/`original1`, or plain `weight`"
+        );
     };
 
     // norm over (in_channels, kernel_size) per output channel
