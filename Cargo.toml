@@ -2,7 +2,7 @@
 name = "kan_tts_rs"
 version = "0.1.0"
 edition = "2021"
-description = "Rust port of py_kan_tts_lite: standalone VITS/MMS-TTS inference (Kannada)"
+description = "Standalone VITS/MMS-TTS (facebook) Kannada language speech synthesis in pure Rust"
 
 [[bin]]
 name = "kan_tts"
