@@ -1,21 +1,74 @@
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
-use kan_tts_rs::config::VitsConfig;
-use kan_tts_rs::model::VitsModel;
-use kan_tts_rs::tokenizer::VitsTokenizer;
-use std::env;
-use std::fs;
-use std::path::{Path, PathBuf};
+use chrono::Local;
+use clap::Parser;
+use tts_rs::config::VitsConfig;
+use tts_rs::download;
+use tts_rs::model::VitsModel;
+use tts_rs::tokenizer::VitsTokenizer;
+use tts_rs::settings::setup_app_folders;
+use tts_rs::wav::write_wav;
+use std::path::{PathBuf};
+use std::sync::Arc;
 
-const DEFAULT_MODEL_DIR: &str = "/home/kkvm/Projects/tts/kan_tts_rs/models/";
-const DEFAULT_OUTPUT_FILE: &str = "./out/output.wav";
+/// A lightweight Text-to-Speech CLI application using Rust and Candle.
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct CliArgs {
+    /// The text you want to synthesize into speech
+    #[arg(default_value = "ನನಗೆ ಕನ್ನಡ ಬರುತ್ತದೆ.")]
+    text: String,
+
+    /// Language option ("kan", "tam", "eng")
+    #[arg(short, long, default_value = "kan")]
+    language: String,
+
+    /// Path to save the generated output WAV file (auto-generated if not provided)
+    #[arg(short, long)]
+    output_file: Option<PathBuf>,
+}
 
 fn main() -> Result<()> {
-    let args = CliArgs::parse()?;
-    let model_dir = args.model_dir;
-    let output_file = args.output_file;
+    // Parse command line arguments via clap
+    let args = CliArgs::parse();
+
+    // Process language input: take first character, lowercase, and validate
+    let raw_lang = args.language.trim();
+    let normalized_lang = if let Some(first_char) = raw_lang.chars().next() {
+        first_char.to_lowercase().to_string()
+    } else {
+        String::new()
+    };
+
+    let tts_lang = match normalized_lang.as_str() {
+        "k" => "kan",
+        "t" => "tam",
+        "e" => "eng",
+        _ => {
+            eprintln!(
+                "Error: The app does not support the language '{}' yet. Supported options are Kannada ('kan'), Tamil ('tam'), and English ('eng').",
+                args.language
+            );
+            std::process::exit(1);
+        }
+    };
+
+    // Set up application folders and automatically fetch the model directory path based on language
+    let paths = Arc::new(setup_app_folders()?);
+    let model_dir = download::download_models(&paths, tts_lang)?;
+
     let text = args.text;
+
+    // Determine output file path: generate a unique name if not provided
+    let output_file = match args.output_file {
+        Some(path) => path,
+        None => {
+            let timestamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
+            let file_name = format!("{}-{}.wav", tts_lang, timestamp);
+            PathBuf::from("./out").join(file_name)
+        }
+    };
 
     let config = VitsConfig::from_pretrained(&model_dir)?;
     let tokenizer = VitsTokenizer::from_pretrained(&model_dir)?;
@@ -48,75 +101,5 @@ fn main() -> Result<()> {
         samples.len(),
         config.sampling_rate
     );
-    Ok(())
-}
-
-struct CliArgs {
-    model_dir: PathBuf,
-    text: String,
-    output_file: PathBuf,
-}
-
-impl CliArgs {
-    fn parse() -> Result<Self> {
-        let args = env::args().skip(1).collect::<Vec<_>>();
-        if args.len() > 1 {
-            anyhow::bail!(
-                "usage: kan_tts [text]\n\
-                 defaults: model_dir={}, file={}",
-                DEFAULT_MODEL_DIR,
-                DEFAULT_OUTPUT_FILE
-            );
-        }
-
-        let text = args
-            .get(0)
-            .cloned()
-            .unwrap_or_else(|| "ನನಗೆ ಕನ್ನಡ ಬರುತ್ತದೆ.".to_string());
-
-        Ok(Self {
-            model_dir: PathBuf::from(DEFAULT_MODEL_DIR),
-            text,
-            output_file: PathBuf::from(DEFAULT_OUTPUT_FILE),
-        })
-    }
-}
-
-fn write_wav(path: &Path, samples: &[f32], sample_rate: u32) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
-    }
-
-    let mut pcm = Vec::with_capacity(samples.len() * 2);
-    for &sample in samples {
-        let clipped = sample.clamp(-1.0, 1.0);
-        let quantized = (clipped * i16::MAX as f32).round() as i16;
-        pcm.extend_from_slice(&quantized.to_le_bytes());
-    }
-
-    let data_len = pcm.len() as u32;
-    let riff_len = 36u32 + data_len;
-    let mut wav = Vec::with_capacity((riff_len + 8) as usize);
-
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&riff_len.to_le_bytes());
-    wav.extend_from_slice(b"WAVE");
-    wav.extend_from_slice(b"fmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&sample_rate.to_le_bytes());
-    let byte_rate = sample_rate * 2;
-    wav.extend_from_slice(&byte_rate.to_le_bytes());
-    wav.extend_from_slice(&2u16.to_le_bytes());
-    wav.extend_from_slice(&16u16.to_le_bytes());
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&data_len.to_le_bytes());
-    wav.extend_from_slice(&pcm);
-
-    fs::write(path, wav).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }

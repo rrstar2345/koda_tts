@@ -1,15 +1,15 @@
 [package]
-name = "kan_tts_rs"
+name = "koda_tts"
 version = "0.1.0"
 edition = "2021"
-description = "Standalone VITS/MMS-TTS (facebook) Kannada language speech synthesis in pure Rust"
+description = "Standalone VITS/MMS-TTS (facebook) speech synthesis in pure Rust"
 
 [[bin]]
-name = "kan_tts"
+name = "koda_tts"
 path = "src/main.rs"
 
 [lib]
-name = "kan_tts_rs"
+name = "tts_rs"
 path = "src/lib.rs"
 
 [dependencies]
@@ -18,6 +18,10 @@ candle-nn = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+dirs = "6.0.0"
+ureq = "3.3.0"
+chrono = "0.4.45"
+clap = { version = "4.6.4", features = ["derive"] }
 
 [profile.release]
 opt-level = 3
